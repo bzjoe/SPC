@@ -1,0 +1,1030 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>USGS Stream Profile & Cross-Section Extractor</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- OpenLayers CSS & JS -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ol@v8.2.0/ol.css">
+  <script src="https://cdn.jsdelivr.net/npm/ol@v8.2.0/dist/ol.js"></script>
+
+  <!-- Turf.js for spatial calculations -->
+  <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+
+  <!-- Chart.js for elevation profile -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <!-- FontAwesome for Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+
+  <!-- Google Fonts: Inter -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap">
+
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    #map { height: 100vh; width: 100vw; z-index: 1; }
+    .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: #1e293b; border-radius: 4px; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #64748b; }
+    
+    .ol-popup-tooltip {
+      position: absolute;
+      background: rgba(15, 23, 42, 0.95);
+      border: 1px solid rgba(56, 189, 248, 0.6);
+      color: #f8fafc;
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 11px;
+      font-weight: 600;
+      white-space: nowrap;
+      pointer-events: none;
+      transform: translate(-50%, -120%);
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.6);
+    }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100 antialiased overflow-hidden">
+
+  <div id="map"></div>
+  <div id="mapTooltip" class="ol-popup-tooltip hidden"></div>
+
+  <!-- Search & Toolbar Header -->
+  <div class="absolute top-4 left-4 z-[1000] flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-[calc(100vw-6rem)] max-w-4xl">
+    <!-- Main Header Card -->
+    <header class="bg-slate-900/95 backdrop-blur-md text-white px-4 py-2.5 rounded-xl border border-slate-700/80 shadow-2xl flex items-center gap-3 shrink-0">
+      <div class="p-2 bg-blue-600/20 text-blue-400 rounded-lg border border-blue-500/30 shrink-0">
+        <i class="fa-solid fa-water text-base"></i>
+      </div>
+      <div>
+        <h1 class="font-bold text-xs tracking-tight text-white leading-tight">USGS Stream &amp; Hydraulic Cross-Section Tool</h1>
+        <p id="statusMsg" class="text-[10px] text-blue-400 font-medium">Click "Draw Stream" profile line (Max 500 ft).</p>
+      </div>
+    </header>
+
+    <!-- Location Search Box -->
+    <div class="relative flex-1 min-w-[280px]">
+      <div class="flex items-center bg-slate-900/95 backdrop-blur-md border border-slate-700/80 rounded-xl px-3.5 py-2 shadow-2xl text-xs w-full">
+        <i class="fa-solid fa-magnifying-glass text-slate-400 mr-2.5 shrink-0"></i>
+        <input type="text" id="searchInput" placeholder="Search city, stream, coordinates (e.g. 38.4192, -82.4452)..." class="bg-transparent text-slate-100 placeholder-slate-400 focus:outline-none w-full font-medium" onkeydown="if(event.key==='Enter') searchLocation()">
+        <button onclick="searchLocation()" class="ml-1.5 p-1 hover:bg-slate-800 text-slate-400 hover:text-white rounded-lg transition-colors shrink-0">
+          <i class="fa-solid fa-arrow-right text-xs"></i>
+        </button>
+      </div>
+      <div id="searchResults" class="hidden absolute top-full left-0 right-0 mt-1 bg-slate-900/95 backdrop-blur-md border border-slate-700/80 rounded-xl shadow-2xl max-h-56 overflow-y-auto custom-scrollbar z-[1001] text-xs"></div>
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="flex items-center gap-2 shrink-0">
+      <button id="drawBtn" onclick="startDrawingStream()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white font-medium rounded-xl transition-colors shadow-lg flex items-center gap-1.5 text-xs">
+        <i class="fa-solid fa-pen-nib text-xs"></i> Draw Stream
+      </button>
+      <button id="clearBtn" onclick="clearMap()" class="hidden px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium rounded-xl transition-colors shadow-lg flex items-center gap-1.5 text-xs">
+        <i class="fa-solid fa-trash text-xs"></i> Reset
+      </button>
+    </div>
+  </div>
+
+  <!-- Basemap & NFHL Switcher Floating Menu -->
+  <div class="absolute top-4 right-4 z-[1000]">
+    <div class="relative">
+      <button onclick="toggleBasemapMenu()" class="bg-slate-900/95 backdrop-blur-md text-slate-200 px-3.5 py-2 rounded-xl border border-slate-700/80 shadow-2xl flex items-center gap-2 text-xs font-semibold hover:bg-slate-800 transition-colors">
+        <i class="fa-solid fa-layer-group text-blue-400"></i>
+        <span>Layers &amp; NFHL</span>
+        <i class="fa-solid fa-chevron-down text-[10px] text-slate-400 ml-1"></i>
+      </button>
+      <div id="basemapMenu" class="hidden absolute right-0 mt-2 w-60 bg-slate-900/95 backdrop-blur-md border border-slate-700/80 rounded-xl shadow-2xl p-2 z-[1001] text-xs flex flex-col gap-2">
+        <div class="text-[10px] uppercase font-semibold text-slate-400 border-b border-slate-700/60 pb-1">Basemaps</div>
+        <button onclick="switchBasemap('usgsTopo')" class="text-left px-2 py-1 rounded-lg text-slate-200 hover:bg-slate-800 flex items-center justify-between">
+          <span>USGS Topo Map</span> <i id="check-usgsTopo" class="fa-solid fa-check text-blue-400"></i>
+        </button>
+        <button onclick="switchBasemap('usgsImagery')" class="text-left px-2 py-1 rounded-lg text-slate-200 hover:bg-slate-800 flex items-center justify-between">
+          <span>USGS Imagery</span> <i id="check-usgsImagery" class="fa-solid fa-check text-blue-400 hidden"></i>
+        </button>
+        <button onclick="switchBasemap('esriWorldImagery')" class="text-left px-2 py-1 rounded-lg text-slate-200 hover:bg-slate-800 flex items-center justify-between">
+          <span>Esri World Imagery</span> <i id="check-esriWorldImagery" class="fa-solid fa-check text-blue-400 hidden"></i>
+        </button>
+        <button onclick="switchBasemap('esriWorldTopo')" class="text-left px-2 py-1 rounded-lg text-slate-200 hover:bg-slate-800 flex items-center justify-between">
+          <span>Esri World Topo</span> <i id="check-esriWorldTopo" class="fa-solid fa-check text-blue-400 hidden"></i>
+        </button>
+        <button onclick="switchBasemap('googleHybrid')" class="text-left px-2 py-1 rounded-lg text-slate-200 hover:bg-slate-800 flex items-center justify-between">
+          <span>Google Hybrid</span> <i id="check-googleHybrid" class="fa-solid fa-check text-blue-400 hidden"></i>
+        </button>
+        <button onclick="switchBasemap('bingAerial')" class="text-left px-2 py-1 rounded-lg text-slate-200 hover:bg-slate-800 flex items-center justify-between">
+          <span>Bing Aerial (Esri fallback; key needed)</span> <i id="check-bingAerial" class="fa-solid fa-check text-blue-400 hidden"></i>
+        </button>
+
+        <div class="text-[10px] uppercase font-semibold text-slate-400 border-t border-slate-700/60 pt-2 mt-1">FEMA NFHL Overlay</div>
+        <label class="flex items-center justify-between cursor-pointer px-2 py-1 rounded-lg hover:bg-slate-800">
+          <span class="text-slate-200">Show FEMA Flood Hazard</span>
+          <input type="checkbox" id="nfhlToggle" onchange="toggleNFHL(this.checked)" class="rounded bg-slate-800 border-slate-700 text-blue-600 focus:ring-0">
+        </label>
+        <div class="px-2 flex flex-col gap-1">
+          <div class="flex justify-between text-[10px] text-slate-400">
+            <span>NFHL Opacity</span>
+            <span id="nfhlOpacityVal">70%</span>
+          </div>
+          <input type="range" id="nfhlOpacitySlider" min="0" max="1" step="0.05" value="0.7" oninput="changeNfhlOpacity(this.value)" class="w-full accent-blue-500 cursor-pointer">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Results Panel Card -->
+  <div id="resultsCard" class="hidden absolute top-20 right-4 bottom-4 z-[1000] w-full max-w-md bg-slate-900/95 backdrop-blur-xl border border-slate-700/80 rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+    <div class="p-3.5 bg-slate-800/80 border-b border-slate-700/80 flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <i class="fa-solid fa-chart-area text-blue-400 text-sm"></i>
+        <h2 class="font-semibold text-xs text-slate-100">Hydraulic Reach Results (40-Point XS)</h2>
+      </div>
+      <button onclick="closeResultsCard()" class="p-1 text-slate-400 hover:text-white hover:bg-slate-700 rounded-lg transition-colors">
+        <i class="fa-solid fa-xmark text-sm"></i>
+      </button>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loadingState" class="hidden p-8 flex-1 flex flex-col items-center justify-center text-center">
+      <div class="w-10 h-10 border-4 border-blue-500/30 border-t-blue-500 rounded-full animate-spin mb-3"></div>
+      <p class="font-medium text-xs text-slate-200">Sampling Orthogonal 40-Point Cross Sections...</p>
+      <p id="loadingDetail" class="text-[10px] text-slate-400 mt-1">Calculating stream tangents &amp; robust bank geometry</p>
+    </div>
+
+    <!-- Results Data Body -->
+    <div id="resultsContent" class="flex-1 flex flex-col overflow-y-auto custom-scrollbar p-3.5 gap-3.5">
+      <!-- Metric Cards -->
+      <div class="grid grid-cols-3 gap-2">
+        <div class="bg-slate-800/60 border border-slate-700/60 p-2 rounded-xl">
+          <span class="text-[9px] uppercase font-semibold text-slate-400 block">Reach Length</span>
+          <span id="statLength" class="text-xs font-bold text-blue-400">--</span>
+        </div>
+        <div class="bg-slate-800/60 border border-slate-700/60 p-2 rounded-xl">
+          <span class="text-[9px] uppercase font-semibold text-slate-400 block">Slope (XS1-XS2)</span>
+          <span id="statSlope12" class="text-xs font-bold text-amber-400">--</span>
+        </div>
+        <div class="bg-slate-800/60 border border-slate-700/60 p-2 rounded-xl">
+          <span class="text-[9px] uppercase font-semibold text-slate-400 block">Slope (XS2-XS3)</span>
+          <span id="statSlope23" class="text-xs font-bold text-emerald-400">--</span>
+        </div>
+      </div>
+
+      <!-- Cross Section Summary Table -->
+      <div class="bg-slate-800/60 border border-slate-700/60 p-2.5 rounded-xl">
+        <div class="text-[11px] font-semibold text-slate-300 mb-1.5 flex items-center justify-between">
+          <span>Cross Section Summary (Hover/Click to Link Map)</span>
+          <span class="text-[9px] text-slate-400">Center Elev / LOB / ROB (ft)</span>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-[10px] text-left">
+            <thead class="text-slate-400 border-b border-slate-700/60">
+              <tr>
+                <th class="pb-1">XS Line</th>
+                <th class="pb-1">Center Elev</th>
+                <th class="pb-1">LOB Sta</th>
+                <th class="pb-1">ROB Sta</th>
+                <th class="pb-1">Position</th>
+              </tr>
+            </thead>
+            <tbody id="xsSummaryRows" class="font-mono text-slate-200"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Elevation Profile Canvas Graph -->
+      <div class="bg-slate-800/60 border border-slate-700/60 p-2.5 rounded-xl flex flex-col gap-2">
+        <div class="flex items-center justify-between">
+          <span class="text-[11px] font-semibold text-slate-300">Point-by-Point Elevation Profile (Hover to Link Map)</span>
+          <select id="xsSelectGraph" onchange="renderGraph(this.value)" class="bg-slate-900 border border-slate-700 text-slate-200 text-[10px] rounded px-1.5 py-0.5 focus:outline-none">
+            <option value="0">XS 1 - Downstream (0 ft)</option>
+            <option value="1">XS 2 - Midstream</option>
+            <option value="2">XS 3 - Upstream (Top)</option>
+          </select>
+        </div>
+        <div class="h-44 w-full bg-slate-950/60 rounded-lg p-2 relative">
+          <canvas id="profileChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Tab-Delimited Data Box -->
+      <div class="bg-slate-800/60 border border-slate-700/60 p-2.5 rounded-xl flex flex-col flex-1 min-h-[140px]">
+        <div class="flex items-center justify-between mb-1.5">
+          <span class="text-[11px] font-semibold text-slate-300">GIS Profile Data (Orthogonal 40-Pt XS)</span>
+          <span class="text-[9px] text-slate-400">Ready for GIS / HEC-RAS</span>
+        </div>
+        <div class="relative flex-1 bg-slate-950 border border-slate-800 rounded-lg p-2 overflow-hidden">
+          <pre id="rawDataOutput" class="text-[10px] font-mono text-emerald-400/90 h-full overflow-y-auto custom-scrollbar select-all whitespace-pre leading-tight"></pre>
+        </div>
+      </div>
+
+      <!-- Export Actions -->
+      <div class="grid grid-cols-2 gap-2">
+        <button onclick="copyToClipboard()" class="py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold text-xs rounded-xl transition-colors shadow flex items-center justify-center gap-1.5">
+          <i class="fa-solid fa-copy text-blue-400"></i> Copy Data
+        </button>
+        <button onclick="exportCSV()" class="py-2 bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs rounded-xl transition-colors shadow flex items-center justify-center gap-1.5">
+          <i class="fa-solid fa-file-csv"></i> Export CSV
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let map, vectorSource, vectorLayer, drawInteraction, tooltipOverlay, tooltipElement;
+    let tempVectorSource, tempVectorLayer;
+    let basemapLayers = {};
+    let nfhlLayer = null;
+    let streamFeature = null;
+    let crossSectionsData = [];
+    let streamVerticesData = [];
+    let chartInstance = null;
+    let activeLinkedXsId = null;
+    let activeHoverPoint = null;
+
+    // Bing Maps requires a real key. Leave blank unless you have a valid Bing Maps key.
+    const BING_MAPS_KEY = '';
+
+    window.onload = function() {
+      initMap();
+    };
+
+    function initMap() {
+      basemapLayers['usgsTopo'] = new ol.layer.Tile({
+        source: new ol.source.XYZ({
+          url: 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}',
+          maxZoom: 22, maxNativeZoom: 16
+        }), visible: true
+      });
+
+      basemapLayers['usgsImagery'] = new ol.layer.Tile({
+        source: new ol.source.XYZ({
+          url: 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}',
+          maxZoom: 22, maxNativeZoom: 16
+        }), visible: false
+      });
+
+      basemapLayers['esriWorldImagery'] = new ol.layer.Tile({
+        source: new ol.source.XYZ({
+          url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+          maxZoom: 22, maxNativeZoom: 19
+        }), visible: false
+      });
+
+      basemapLayers['esriWorldTopo'] = new ol.layer.Tile({
+        source: new ol.source.XYZ({
+          url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
+          maxZoom: 22, maxNativeZoom: 19
+        }), visible: false
+      });
+
+      basemapLayers['googleHybrid'] = new ol.layer.Tile({
+        source: new ol.source.XYZ({
+          url: 'https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
+          maxZoom: 22
+        }), visible: false
+      });
+
+      // Do not send a placeholder key to Bing. The menu falls back to Esri imagery
+      // until a real Bing Maps key is configured above.
+      if (BING_MAPS_KEY.trim()) {
+        basemapLayers['bingAerial'] = new ol.layer.Tile({
+          source: new ol.source.BingMaps({
+            key: BING_MAPS_KEY.trim(),
+            imagerySet: 'Aerial'
+          }), visible: false
+        });
+      } else {
+        // Keep the existing menu option usable without pretending Bing is configured.
+        basemapLayers['bingAerial'] = new ol.layer.Tile({
+          source: new ol.source.XYZ({
+            url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+            maxZoom: 22, maxNativeZoom: 19
+          }), visible: false
+        });
+      }
+
+      nfhlLayer = new ol.layer.Tile({
+        // FEMA's ArcGIS REST MapServer is more reliable here than guessing WMS layer IDs.
+        // Core flood layers: flood hazard boundaries (27), flood hazard zones (28),
+        // and base flood elevations (16).
+        source: new ol.source.TileArcGISRest({
+          url: 'https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer',
+          params: { LAYERS: 'show:27,28,16' },
+          crossOrigin: 'anonymous'
+        }),
+        visible: false,
+        opacity: 0.7
+      });
+
+      vectorSource = new ol.source.Vector();
+      vectorLayer = new ol.layer.Vector({
+        source: vectorSource,
+        style: featureStyleFunction
+      });
+
+      tempVectorSource = new ol.source.Vector();
+      tempVectorLayer = new ol.layer.Vector({
+        source: tempVectorSource,
+        style: new ol.style.Style({
+          stroke: new ol.style.Stroke({ color: '#f59e0b', width: 2, lineDash: [6, 6] })
+        })
+      });
+
+      tooltipElement = document.getElementById('mapTooltip');
+      tooltipOverlay = new ol.Overlay({
+        element: tooltipElement,
+        offset: [0, -15],
+        positioning: 'bottom-center'
+      });
+
+      map = new ol.Map({
+        target: 'map',
+        layers: [
+          basemapLayers['usgsTopo'],
+          basemapLayers['usgsImagery'],
+          basemapLayers['esriWorldImagery'],
+          basemapLayers['esriWorldTopo'],
+          basemapLayers['googleHybrid'],
+          basemapLayers['bingAerial'],
+          nfhlLayer,
+          vectorLayer,
+          tempVectorLayer
+        ],
+        overlays: [tooltipOverlay],
+        view: new ol.View({
+          center: ol.proj.fromLonLat([-82.4452, 38.4192]),
+          zoom: 15, maxZoom: 22
+        })
+      });
+    }
+
+    function toggleBasemapMenu() {
+      document.getElementById('basemapMenu').classList.toggle('hidden');
+    }
+
+    function switchBasemap(key) {
+      // Without a valid Bing key, the Bing menu item intentionally uses Esri imagery.
+      // Keep the menu state consistent with the requested choice.
+      Object.keys(basemapLayers).forEach(k => {
+        basemapLayers[k].setVisible(k === key);
+        const check = document.getElementById(`check-${k}`);
+        if (check) check.classList.toggle('hidden', k !== key);
+      });
+    }
+
+    function toggleNFHL(show) {
+      nfhlLayer.setVisible(show);
+    }
+
+    function changeNfhlOpacity(val) {
+      const opacity = parseFloat(val);
+      nfhlLayer.setOpacity(opacity);
+      document.getElementById('nfhlOpacityVal').textContent = `${Math.round(opacity * 100)}%`;
+    }
+
+    function featureStyleFunction(feature) {
+      const type = feature.get('type');
+      const xsId = feature.get('xsId');
+      const isLinkedXs = xsId === activeLinkedXsId;
+      const isHoveredPt = activeHoverPoint && feature.get('pointIndex') === activeHoverPoint.index && xsId === activeHoverPoint.xsId;
+
+      if (type === 'stream') {
+        return new ol.style.Style({
+          stroke: new ol.style.Stroke({ color: '#0284c7', width: 5 })
+        });
+      } else if (type === 'crossSection') {
+        return new ol.style.Style({
+          stroke: new ol.style.Stroke({ 
+            color: isLinkedXs ? '#f59e0b' : '#38bdf8', 
+            width: isLinkedXs ? 4 : 2.5 
+          }),
+          text: new ol.style.Text({
+            text: feature.get('label') || '',
+            font: isLinkedXs ? 'bold 14px Inter, sans-serif' : 'bold 12px Inter, sans-serif',
+            fill: new ol.style.Fill({ color: isLinkedXs ? '#fbbf24' : '#38bdf8' }),
+            stroke: new ol.style.Stroke({ color: '#0f172a', width: 3 }),
+            offsetY: -10
+          })
+        });
+      } else if (type === 'invertMarker') {
+        return new ol.style.Style({
+          image: new ol.style.Circle({
+            radius: isLinkedXs ? 8 : 6,
+            fill: new ol.style.Fill({ color: '#f97316' }),
+            stroke: new ol.style.Stroke({ color: '#ffffff', width: 2 })
+          }),
+          text: new ol.style.Text({
+            text: feature.get('name') || '',
+            font: 'bold 12px Inter, sans-serif',
+            fill: new ol.style.Fill({ color: '#f8fafc' }),
+            stroke: new ol.style.Stroke({ color: '#0f172a', width: 3.5 }),
+            offsetY: -14
+          })
+        });
+      } else if (type === 'bankMarker') {
+        return new ol.style.Style({
+          image: new ol.style.Circle({
+            radius: 5,
+            fill: new ol.style.Fill({ color: '#10b981' }),
+            stroke: new ol.style.Stroke({ color: '#ffffff', width: 1.5 })
+          }),
+          text: new ol.style.Text({
+            text: feature.get('label') || '',
+            font: 'bold 10px Inter, sans-serif',
+            fill: new ol.style.Fill({ color: '#34d399' }),
+            stroke: new ol.style.Stroke({ color: '#0f172a', width: 3 }),
+            offsetY: 12
+          })
+        });
+      } else if (type === 'xsPoint') {
+        return new ol.style.Style({
+          image: new ol.style.Circle({
+            radius: isHoveredPt ? 8 : (isLinkedXs ? 4 : 2.5),
+            fill: new ol.style.Fill({ color: isHoveredPt ? '#ef4444' : (isLinkedXs ? '#fbbf24' : '#38bdf8') }),
+            stroke: new ol.style.Stroke({ color: '#ffffff', width: isHoveredPt ? 2 : 1 })
+          })
+        });
+      }
+    }
+
+    function startDrawingStream() {
+      clearMap();
+      document.getElementById('statusMsg').textContent = "Draw stream profile line from Upstream to Downstream (Max 500 ft).";
+      document.getElementById('drawBtn').classList.add('hidden');
+
+      drawInteraction = new ol.interaction.Draw({
+        source: vectorSource,
+        type: 'LineString',
+        style: new ol.style.Style({
+          stroke: new ol.style.Stroke({ color: '#38bdf8', width: 4 })
+        })
+      });
+
+      map.addInteraction(drawInteraction);
+
+      drawInteraction.on('drawstart', function(evt) {
+        const geom = evt.feature.getGeometry();
+        geom.on('change', function() {
+          const coords = geom.getCoordinates().map(c => ol.proj.toLonLat(c));
+          if (coords.length > 1) {
+            const lineStr = turf.lineString(coords);
+            const distFt = turf.length(lineStr, { units: 'feet' });
+            tooltipElement.innerHTML = `${distFt.toFixed(1)} ft / 500 ft max`;
+            tooltipOverlay.setPosition(geom.getLastCoordinate());
+            tooltipElement.classList.remove('hidden');
+          }
+        });
+      });
+
+      drawInteraction.on('drawend', function(event) {
+        tooltipElement.classList.add('hidden');
+        streamFeature = event.feature;
+        streamFeature.set('type', 'stream');
+        map.removeInteraction(drawInteraction);
+
+        const geom = streamFeature.getGeometry();
+        const coords4326 = geom.getCoordinates().map(c => ol.proj.toLonLat(c));
+        const lineGeoJSON = turf.lineString(coords4326);
+        const lengthFeet = turf.length(lineGeoJSON, { units: 'feet' });
+
+        if (lengthFeet > 500) {
+          alert(`Stream length is ${lengthFeet.toFixed(1)} ft, exceeding the strict 500 ft limit. Redraw a shorter reach.`);
+          vectorSource.removeFeature(streamFeature);
+          document.getElementById('drawBtn').classList.remove('hidden');
+          document.getElementById('statusMsg').textContent = "Length exceeded 500 ft. Redraw stream reach.";
+          return;
+        }
+
+        streamVerticesData = [];
+        let cumDist = 0;
+        for (let i = 0; i < coords4326.length; i++) {
+          if (i > 0) {
+            cumDist += turf.distance(turf.point(coords4326[i-1]), turf.point(coords4326[i]), { units: 'feet' });
+          }
+          streamVerticesData.push({
+            lng: coords4326[i][0],
+            lat: coords4326[i][1],
+            reachSta: cumDist
+          });
+        }
+
+        document.getElementById('clearBtn').classList.remove('hidden');
+        document.getElementById('statusMsg').textContent = "Profile line locked. Move cursor to extend cross-section width and click to set.";
+        
+        initWidthSelection(lineGeoJSON);
+      });
+    }
+
+    function initWidthSelection(streamGeoJSON) {
+      const coords = streamGeoJSON.geometry.coordinates;
+      const endPointCoord = coords[coords.length - 1];
+      const prevPointCoord = coords[coords.length - 2];
+
+      const bearing = turf.bearing(turf.point(prevPointCoord), turf.point(endPointCoord));
+      const leftBearing = bearing - 90;
+      const rightBearing = bearing + 90;
+
+      const pointerMoveKey = map.on('pointermove', function(e) {
+        const clickCoord4326 = ol.proj.toLonLat(e.coordinate);
+        const armFt = turf.distance(turf.point(endPointCoord), turf.point(clickCoord4326), { units: 'feet' });
+        const totalWidthFt = Math.max(10, armFt * 2);
+
+        const halfWidth = totalWidthFt / 2;
+        const leftPt = turf.destination(turf.point(endPointCoord), halfWidth, leftBearing, { units: 'feet' });
+        const rightPt = turf.destination(turf.point(endPointCoord), halfWidth, rightBearing, { units: 'feet' });
+
+        const tempLine = turf.lineString([leftPt.geometry.coordinates, rightPt.geometry.coordinates]);
+        
+        tempVectorSource.clear();
+        const tempLineFeature = new ol.format.GeoJSON().readFeature(tempLine, {
+          dataProjection: 'EPSG:4326', featureProjection: map.getView().getProjection()
+        });
+        tempVectorSource.addFeature(tempLineFeature);
+
+        tooltipElement.innerHTML = `XS Width: ${totalWidthFt.toFixed(1)} ft (Click to Set)`;
+        tooltipOverlay.setPosition(e.coordinate);
+        tooltipElement.classList.remove('hidden');
+      });
+
+      const clickListener = map.on('singleclick', function(e) {
+        ol.Observable.unByKey(clickListener);
+        ol.Observable.unByKey(pointerMoveKey);
+        tooltipElement.classList.add('hidden');
+        tempVectorSource.clear();
+
+        const clickCoord4326 = ol.proj.toLonLat(e.coordinate);
+        const armLengthFeet = turf.distance(turf.point(endPointCoord), turf.point(clickCoord4326), { units: 'feet' });
+        const totalWidthFeet = Math.max(20, Math.min(armLengthFeet * 2, 2000));
+
+        processHydraulicModel(streamGeoJSON, totalWidthFeet);
+      });
+    }
+
+    // Robust Segment-Based Bearing Calculation to prevent North-South collapse
+    function getSegmentBearing(streamGeoJSON, distAlong) {
+      const coords = streamGeoJSON.geometry.coordinates;
+      if (coords.length < 2) return 0;
+
+      let accumulated = 0;
+      for (let i = 0; i < coords.length - 1; i++) {
+        const pt1 = turf.point(coords[i]);
+        const pt2 = turf.point(coords[i+1]);
+        const segDist = turf.distance(pt1, pt2, { units: 'feet' });
+
+        if (accumulated + segDist >= distAlong || i === coords.length - 2) {
+          return turf.bearing(pt1, pt2);
+        }
+        accumulated += segDist;
+      }
+      return turf.bearing(turf.point(coords[coords.length-2]), turf.point(coords[coords.length-1]));
+    }
+
+    async function processHydraulicModel(streamGeoJSON, totalWidthFeet) {
+      showLoading(true);
+      document.getElementById('statusMsg').textContent = "Computing orthogonal cross-sections with segment bearings...";
+      try {
+      const totalLengthFeet = turf.length(streamGeoJSON, { units: 'feet' });
+
+      const xsConfigs = [
+        { id: 1, name: "XS 1 (Downstream)", fraction: 1.0, station: 0.0 },
+        { id: 2, name: "XS 2 (Midstream)", fraction: 0.5, station: totalLengthFeet * 0.5 },
+        { id: 3, name: "XS 3 (Upstream)", fraction: 0.0, station: totalLengthFeet }
+      ];
+
+      crossSectionsData = [];
+
+      for (let cfg of xsConfigs) {
+        const distAlongFromStart = totalLengthFeet * cfg.fraction;
+        const centerPt = turf.along(streamGeoJSON, distAlongFromStart, { units: 'feet' });
+
+        // Get robust segment bearing
+        const streamBearing = getSegmentBearing(streamGeoJSON, distAlongFromStart);
+
+        // Orthogonal angles looking downstream: Left = bearing - 90, Right = bearing + 90
+        const leftBearing = streamBearing - 90;
+        const rightBearing = streamBearing + 90;
+        const halfWidth = totalWidthFeet / 2;
+
+        const leftEnd = turf.destination(centerPt, halfWidth, leftBearing, { units: 'feet' });
+        const rightEnd = turf.destination(centerPt, halfWidth, rightBearing, { units: 'feet' });
+
+        const xsLine = turf.lineString([leftEnd.geometry.coordinates, rightEnd.geometry.coordinates]);
+
+        const xsFeature = new ol.format.GeoJSON().readFeature(xsLine, {
+          dataProjection: 'EPSG:4326', featureProjection: map.getView().getProjection()
+        });
+        xsFeature.set('type', 'crossSection');
+        xsFeature.set('label', `XS ${cfg.id}`);
+        xsFeature.set('xsId', cfg.id);
+        vectorSource.addFeature(xsFeature);
+
+        const numSamples = 40;
+        const sampleStepFt = totalWidthFeet / (numSamples - 1);
+        const rawPts = [];
+
+        for (let i = 0; i < numSamples; i++) {
+          const pt = turf.along(xsLine, i * sampleStepFt, { units: 'feet' });
+          rawPts.push({
+            lng: pt.geometry.coordinates[0],
+            lat: pt.geometry.coordinates[1],
+            absoluteDist: i * sampleStepFt
+          });
+        }
+
+        const rawElevations = await fetchUSGSElevationsBatch(rawPts);
+        const denseProfile = rawPts.map((p, idx) => ({ ...p, elevation: rawElevations[idx], xsStation: p.absoluteDist }));
+
+        let intersectIndex = 0;
+        let minDist = Infinity;
+        denseProfile.forEach((p, idx) => {
+          const d = turf.distance(turf.point([p.lng, p.lat]), centerPt, { units: 'feet' });
+          if (d < minDist) {
+            minDist = d;
+            intersectIndex = idx;
+          }
+        });
+
+        const intersectedProfile = denseProfile.map((p, idx) => {
+          const offsetFromCenter = p.absoluteDist - denseProfile[intersectIndex].absoluteDist;
+          return {
+            ...p,
+            offset: offsetFromCenter,
+            index: idx
+          };
+        });
+
+        // Add 40 points as map features
+        intersectedProfile.forEach(p => {
+          const ptFeat = new ol.Feature({
+            geometry: new ol.geom.Point(ol.proj.fromLonLat([p.lng, p.lat])),
+            type: 'xsPoint',
+            xsId: cfg.id,
+            pointIndex: p.index
+          });
+          vectorSource.addFeature(ptFeat);
+        });
+
+        // Hydraulic Bank Identification: Centerline reference, LOB (left), ROB (right)
+        const geomData = detectHydraulicBanksPrecise(intersectedProfile, intersectIndex);
+
+        const invFt = new ol.Feature({
+          geometry: new ol.geom.Point(ol.proj.fromLonLat([centerPt.geometry.coordinates[0], centerPt.geometry.coordinates[1]])),
+          type: 'invertMarker', name: `XS ${cfg.id}`, xsId: cfg.id
+        });
+        const lobFt = new ol.Feature({
+          geometry: new ol.geom.Point(ol.proj.fromLonLat([geomData.leftBank.lng, geomData.leftBank.lat])),
+          type: 'bankMarker', label: `XS ${cfg.id} LOB`, xsId: cfg.id
+        });
+        const robFt = new ol.Feature({
+          geometry: new ol.geom.Point(ol.proj.fromLonLat([geomData.rightBank.lng, geomData.rightBank.lat])),
+          type: 'bankMarker', label: `XS ${cfg.id} ROB`, xsId: cfg.id
+        });
+
+        vectorSource.addFeatures([invFt, lobFt, robFt]);
+
+        crossSectionsData.push({
+          id: cfg.id,
+          name: cfg.name,
+          station: cfg.station,
+          width: totalWidthFeet,
+          invert: { ...intersectedProfile[intersectIndex], elevation: denseProfile[intersectIndex].elevation },
+          leftBank: geomData.leftBank,
+          rightBank: geomData.rightBank,
+          profile: intersectedProfile
+        });
+      }
+
+      crossSectionsData.sort((a, b) => a.id - b.id);
+
+      showLoading(false);
+      renderResults(totalLengthFeet);
+      document.getElementById('statusMsg').textContent = "Analysis Complete! Orthogonal cross-sections established.";
+      } catch (err) {
+        console.error('Hydraulic profile processing failed:', err);
+        showLoading(false);
+        document.getElementById('statusMsg').textContent = "Analysis failed. Check the browser console or retry.";
+        alert("The cross-section analysis did not complete. The stream line is preserved; please retry. Details are in the browser console.");
+      }
+    }
+
+    async function fetchUSGSElevationsBatch(points) {
+      const promises = points.map(async (pt) => {
+        const url = `https://epqs.nationalmap.gov/v1/json?x=${pt.lng}&y=${pt.lat}&units=Feet&output=json`;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const res = await fetch(url);
+            const d = await res.json();
+            const val = parseFloat(d.value);
+            if (!isNaN(val) && val > -500) return val;
+          } catch (e) {
+            // retry
+          }
+        }
+        return null;
+      });
+
+      const elevations = await Promise.all(promises);
+
+      // Fill only gaps bracketed by real samples. Never invent a default elevation.
+      for (let i = 0; i < elevations.length; i++) {
+        if (elevations[i] !== null) continue;
+
+        let prev = i - 1;
+        while (prev >= 0 && elevations[prev] === null) prev--;
+        let next = i + 1;
+        while (next < elevations.length && elevations[next] === null) next++;
+
+        if (prev >= 0 && next < elevations.length) {
+          const fraction = (i - prev) / (next - prev);
+          elevations[i] = elevations[prev] + (elevations[next] - elevations[prev]) * fraction;
+        } else if (prev >= 0) {
+          elevations[i] = elevations[prev];
+        } else if (next < elevations.length) {
+          elevations[i] = elevations[next];
+        }
+      }
+
+      return elevations;
+    }
+
+    // Approximate bank-break detection from the sampled terrain profile.
+    // A bank is not necessarily the highest point on that side: distant hills can be higher.
+    // This heuristic searches outward from the channel reference for the strongest local
+    // rise/grade break, and falls back to the nearest valid sample if the profile is flat.
+    function detectHydraulicBanksPrecise(profile, invertIdx) {
+      const valid = (p) => p && Number.isFinite(p.elevation);
+      const findBank = (start, end, step) => {
+        const candidates = [];
+        for (let i = start + step; step > 0 ? i <= end : i >= end; i += step) {
+          const near = profile[i - step];
+          const here = profile[i];
+          const far = profile[i + step];
+          if (!valid(near) || !valid(here)) continue;
+          const grade = Math.abs(here.elevation - near.elevation);
+          const nextGrade = valid(far) ? Math.abs(far.elevation - here.elevation) : 0;
+          candidates.push({ i, score: grade + Math.abs(grade - nextGrade) });
+        }
+        if (candidates.length) {
+          // Prefer the first clear break outward from the channel over a distant peak.
+          const threshold = Math.max(...candidates.map(c => c.score)) * 0.65;
+          const selected = candidates.find(c => c.score >= threshold);
+          if (selected) return selected.i;
+        }
+        for (let i = start + step; step > 0 ? i <= end : i >= end; i += step) {
+          if (valid(profile[i])) return i;
+        }
+        return start;
+      };
+
+      const leftBankIdx = findBank(invertIdx, 0, -1);
+      const rightBankIdx = findBank(invertIdx, profile.length - 1, 1);
+
+      return {
+        leftBank: profile[leftBankIdx],
+        rightBank: profile[rightBankIdx]
+      };
+    }
+
+    function renderResults(totalLengthFeet) {
+      document.getElementById('resultsCard').classList.remove('hidden');
+      document.getElementById('statLength').textContent = `${totalLengthFeet.toFixed(1)} ft`;
+
+      const xs1 = crossSectionsData.find(x => x.id === 1);
+      const xs2 = crossSectionsData.find(x => x.id === 2);
+      const xs3 = crossSectionsData.find(x => x.id === 3);
+
+      const dist12 = Math.abs(xs2.station - xs1.station);
+      const dz12 = xs2.invert.elevation - xs1.invert.elevation;
+      const slope12 = dist12 > 0 ? (dz12 / dist12) : 0;
+
+      const dist23 = Math.abs(xs3.station - xs2.station);
+      const dz23 = xs3.invert.elevation - xs2.invert.elevation;
+      const slope23 = dist23 > 0 ? (dz23 / dist23) : 0;
+
+      document.getElementById('statSlope12').textContent = `${slope12.toFixed(4)} ft/ft`;
+      document.getElementById('statSlope23').textContent = `${slope23.toFixed(4)} ft/ft`;
+
+      let summaryHtml = "";
+      crossSectionsData.forEach(xs => {
+        const pos = xs.id === 1 ? 'Downstream' : (xs.id === 2 ? 'Midstream' : 'Upstream');
+        summaryHtml += `<tr class="border-b border-slate-700/40 hover:bg-slate-800/80 cursor-pointer transition-colors" onmouseenter="linkMapFeature(${xs.id})" onclick="selectGraphXs(${xs.id - 1})">
+          <td class="py-1 font-semibold text-blue-400">XS ${xs.id}</td>
+          <td class="py-1 text-emerald-400">${xs.invert.elevation.toFixed(2)}</td>
+          <td class="py-1">${xs.leftBank.xsStation.toFixed(1)}</td>
+          <td class="py-1">${xs.rightBank.xsStation.toFixed(1)}</td>
+          <td class="py-1 text-slate-400 text-[9px]">${pos}</td>
+        </tr>`;
+      });
+      document.getElementById('xsSummaryRows').innerHTML = summaryHtml;
+
+      renderGraph(0);
+      updateRawOutput(slope12, slope23);
+    }
+
+    function linkMapFeature(xsId) {
+      activeLinkedXsId = xsId;
+      activeHoverPoint = null;
+      vectorLayer.changed();
+    }
+
+    function selectGraphXs(index) {
+      document.getElementById('xsSelectGraph').value = index;
+      renderGraph(index);
+    }
+
+    function renderGraph(xsIndex) {
+      const xs = crossSectionsData[xsIndex];
+      if (!xs) return;
+
+      linkMapFeature(xs.id);
+
+      const labels = xs.profile.map(p => p.xsStation.toFixed(1));
+      const data = xs.profile.map(p => p.elevation);
+
+      const ctx = document.getElementById('profileChart').getContext('2d');
+      if (chartInstance) chartInstance.destroy();
+
+      chartInstance = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: 'Elevation (ft)',
+            data: data,
+            borderColor: '#38bdf8',
+            backgroundColor: 'rgba(56, 189, 248, 0.1)',
+            borderWidth: 2,
+            pointRadius: 3,
+            pointBackgroundColor: '#0284c7',
+            fill: true,
+            tension: 0.1
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          onHover: (event, activeElements) => {
+            if (activeElements.length > 0) {
+              const ptIndex = activeElements[0].index;
+              const ptData = xs.profile[ptIndex];
+              activeHoverPoint = { xsId: xs.id, index: ptIndex };
+              vectorLayer.changed();
+
+              const coord4326 = [ptData.lng, ptData.lat];
+              tooltipElement.innerHTML = `XS ${xs.id} | Sta: ${ptData.xsStation.toFixed(1)} ft | Elev: ${ptData.elevation.toFixed(2)} ft`;
+              tooltipOverlay.setPosition(ol.proj.fromLonLat(coord4326));
+              tooltipElement.classList.remove('hidden');
+            } else {
+              if (activeHoverPoint !== null) {
+                activeHoverPoint = null;
+                vectorLayer.changed();
+                tooltipElement.classList.add('hidden');
+              }
+            }
+          },
+          scales: {
+            x: {
+              grid: { color: '#334155' },
+              ticks: { color: '#94a3b8', font: { size: 8 } },
+              title: { display: true, text: 'XS_Station (Left to Right Absolute Distance in ft)', color: '#64748b', font: { size: 9 } }
+            },
+            y: {
+              grid: { color: '#334155' },
+              ticks: { color: '#94a3b8', font: { size: 8 } },
+              title: { display: true, text: 'Elevation (ft)', color: '#64748b', font: { size: 9 } }
+            }
+          }
+        }
+      });
+    }
+
+    function updateRawOutput(slope12, slope23) {
+      const now = new Date();
+      const timeStampStr = now.toISOString().replace('T', ' ').substring(0, 19);
+
+      let text = `# USGS Hydraulic Stream Profile & Orthogonal 40-Point Cross-Section Extraction\n`;
+      text += `# Date/Time: ${timeStampStr}\n`;
+      text += `# Total Reach Length: ${document.getElementById('statLength').textContent}\n`;
+      text += `# Segment Slope XS1 to XS2: ${slope12.toFixed(4)} ft/ft\n`;
+      text += `# Segment Slope XS2 to XS3: ${slope23.toFixed(4)} ft/ft\n\n`;
+
+      text += `# --- STREAM CENTERLINE PROFILE GEOMETRY ---\n`;
+      text += `FEATURE_TYPE\tLATITUDE\tLONGITUDE\tREACH_STA_FT\tELEVATION_FT\n`;
+      streamVerticesData.forEach(v => {
+        text += `STREAM_LINE\t${v.lat.toFixed(6)}\t${v.lng.toFixed(6)}\t${v.reachSta.toFixed(1)}\t--\n`;
+      });
+
+      text += `\n# --- 40-POINT CROSS SECTION DATA (WITH XS_STATION & PRECISE BANKS) ---\n`;
+      text += `XS_LINE\tLATITUDE\tLONGITUDE\tREACH_STA_FT\tXS_STATION\tOFFSET_FT\tELEVATION_FT\tBANK_FLAG\n`;
+
+      crossSectionsData.forEach(xs => {
+        xs.profile.forEach(p => {
+          let flag = "";
+          if (Math.abs(p.offset) < 0.5) flag = "CENTERLINE";
+          else if (Math.abs(p.xsStation - xs.leftBank.xsStation) < 1.0) flag = "LOB";
+          else if (Math.abs(p.xsStation - xs.rightBank.xsStation) < 1.0) flag = "ROB";
+
+          text += `XS_${xs.id}\t${p.lat.toFixed(6)}\t${p.lng.toFixed(6)}\t${xs.station.toFixed(1)}\t${p.xsStation.toFixed(1)}\t${p.offset.toFixed(1)}\t${p.elevation.toFixed(2)}\t${flag}\n`;
+        });
+      });
+
+      document.getElementById('rawDataOutput').textContent = text;
+    }
+
+    function searchLocation() {
+      const query = document.getElementById('searchInput').value;
+      if (!query) return;
+
+      if (query.includes(',')) {
+        const parts = query.split(',').map(p => parseFloat(p.trim()));
+        if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+          zoomToLocation(parts[0], parts[1], `Coordinates: ${parts[0]}, ${parts[1]}`);
+          return;
+        }
+      }
+
+      fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`)
+        .then(res => res.json())
+        .then(data => {
+          const resultsEl = document.getElementById('searchResults');
+          if (data.length === 0) {
+            resultsEl.innerHTML = `<div class="p-2 text-slate-400">No results found.</div>`;
+            resultsEl.classList.remove('hidden');
+            return;
+          }
+
+          let html = "";
+          data.slice(0, 5).forEach(item => {
+            html += `<div onclick="zoomToLocation(${item.lat}, ${item.lon}, '${item.display_name.replace(/'/g, "\\'")}')" class="p-2.5 hover:bg-slate-800 cursor-pointer border-b border-slate-800/80 text-slate-200 text-xs">
+              ${item.display_name}
+            </div>`;
+          });
+
+          resultsEl.innerHTML = html;
+          resultsEl.classList.remove('hidden');
+        });
+    }
+
+    function zoomToLocation(lat, lon, name) {
+      document.getElementById('searchResults').classList.add('hidden');
+      document.getElementById('searchInput').value = name.split(',')[0];
+      map.getView().animate({
+        center: ol.proj.fromLonLat([parseFloat(lon), parseFloat(lat)]),
+        zoom: 16,
+        duration: 1000
+      });
+    }
+
+    function exportCSV() {
+      const text = document.getElementById('rawDataOutput').textContent;
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const timeStamp = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+      const filename = `USGS_Stream_Profile_40Pt_${timeStamp}.csv`;
+
+      const blob = new Blob([text], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement("a");
+      const url = URL.createObjectURL(blob);
+      link.setAttribute("href", url);
+      link.setAttribute("download", filename);
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+
+    function copyToClipboard() {
+      navigator.clipboard.writeText(document.getElementById('rawDataOutput').textContent);
+      alert("Tab-delimited orthogonal 40-point cross-section data copied to clipboard!");
+    }
+
+    function showLoading(show) {
+      document.getElementById('loadingState').classList.toggle('hidden', !show);
+      document.getElementById('resultsContent').classList.toggle('hidden', show);
+      if (show) document.getElementById('resultsCard').classList.remove('hidden');
+    }
+
+    function clearMap() {
+      if (drawInteraction) map.removeInteraction(drawInteraction);
+      vectorSource.clear();
+      tempVectorSource.clear();
+      streamFeature = null;
+      crossSectionsData = [];
+      streamVerticesData = [];
+      activeLinkedXsId = null;
+      activeHoverPoint = null;
+      closeResultsCard();
+      document.getElementById('drawBtn').classList.remove('hidden');
+      document.getElementById('clearBtn').classList.add('hidden');
+      document.getElementById('statusMsg').textContent = "Click 'Draw Stream' profile line (Max 500 ft).";
+    }
+
+    function closeResultsCard() {
+      document.getElementById('resultsCard').classList.add('hidden');
+    }
+  </script>
+</body>
+</html>
